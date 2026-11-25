@@ -1,0 +1,48 @@
+{
+  "name": "dsh-context-capacity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "每次模型请求前告诉模型当前上下文窗口的占用：已用 tokens、窗口容量、剩余比例。",
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "context-window",
+    "tokens",
+    "cordis"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/6nh2nkdznz-dot/dsh-context-capacity.git"
+  },
+  "homepage": "https://github.com/6nh2nkdznz-dot/dsh-context-capacity#readme",
+  "bugs": {
+    "url": "https://github.com/6nh2nkdznz-dot/dsh-context-capacity/issues"
+  },
+  "license": "MIT"
+}

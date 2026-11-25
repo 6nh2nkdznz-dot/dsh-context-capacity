@@ -1,0 +1,16 @@
+# Loads the context-capacity plugin into every profile that installs this bundle.
+#
+# Keep the entry id identical to the package name: a bare id such as
+# "context-capacity" would collide with an unrelated plugin, and the id line
+# must not carry a trailing comment (the loader matches the line literally).
+- insert:
+    - id: dsh-context-capacity
+      name: 'dsh-context-capacity'
+      config:
+        # Injected readings follow the messages of the person reading them.
+        locale: zh
+        # Re-read mid-turn only after the reading grew by this many points;
+        # 0 injects on every model step.
+        refreshPercent: 10
+        # Above this share of the window the reading adds a short warning.
+        warnPercent: 80

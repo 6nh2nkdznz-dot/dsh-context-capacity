@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Context capacity",
+    "description": "Reports how much of the context window the session already occupies before each model request, so the model can summarize, compact, or hand off before it runs into the limit.",
+    "detail": "docs/DETAIL.md"
+  }
+}
