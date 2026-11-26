@@ -7,6 +7,11 @@
  * names the turn and step that sampled it so the model can tell a stale
  * number from a fresh one.
  *
+ * The reading prefers the prompt size the provider actually reported whenever
+ * the meter could not anchor its own estimate on that sample: a session whose
+ * history is compressed before sending reprices far above its real prompt, and
+ * that repricing says nothing about the next request.
+ *
  * The package deliberately imports nothing from the harness. A bundle linked
  * from a local directory resolves its own specifiers from that directory's
  * node_modules chain, where the `@deepseek-ai` packages are not installed, so
@@ -114,7 +119,7 @@ function render(settings, reading, turn, step) {
   const chinese = settings.locale === 'zh'
   const used = NUMBER.format(reading.used)
   const lines = []
-  if (!reading.sampled) {
+  if (reading.basis === 'none') {
     if (reading.window === undefined) {
       lines.push(chinese
         ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前）：本次会话还没有已记录的请求，该模型路由也尚未报告窗口容量。`
@@ -126,14 +131,27 @@ function render(settings, reading, turn, step) {
     }
   } else if (reading.window === undefined) {
     lines.push(chinese
-      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，按本次请求估算）：已用约 ${used} tokens，该模型路由尚未报告窗口容量。`
-      : `Context capacity sampled before turn ${turn}, step ${step} (estimated for the pending request): about ${used} tokens used; this route has not reported a context window.`)
+      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${reading.basis === 'sample' ? '按最近一次请求实测' : '按待发请求估算'}）：已用约 ${used} tokens，该模型路由尚未报告窗口容量。`
+      : `Context capacity sampled before turn ${turn}, step ${step} (${reading.basis === 'sample' ? 'measured on the most recent request' : 'estimated for the pending request'}): about ${used} tokens used; this route has not reported a context window.`)
   } else {
     const window = NUMBER.format(reading.window)
     const remaining = NUMBER.format(reading.remaining)
+    const qualifier = reading.basis === 'sample'
+      ? (chinese ? '按最近一次请求实测' : 'measured on the most recent request')
+      : (chinese ? '按待发请求估算' : 'estimated for the pending request')
     lines.push(chinese
-      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，按本次请求估算）：已用 ${used} / ${window} tokens（${reading.percent}%），剩余 ${remaining}。`
-      : `Context capacity sampled before turn ${turn}, step ${step} (estimated for the pending request): ${used} of ${window} tokens used (${reading.percent}%), ${remaining} remaining.`)
+      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${qualifier}）：已用 ${used} / ${window} tokens（${reading.percent}%），剩余 ${remaining}。`
+      : `Context capacity sampled before turn ${turn}, step ${step} (${qualifier}): ${used} of ${window} tokens used (${reading.percent}%), ${remaining} remaining.`)
+  }
+  if (reading.overstated !== undefined) {
+    lines.push(chinese
+      ? `（会话历史在发送前已被压缩：按会话表面重建的估算为 ${NUMBER.format(reading.overstated)} tokens，远高于实测值，故以实测为准。）`
+      : `(history is compressed before sending: repricing the session surface gives ${NUMBER.format(reading.overstated)} tokens, far above the measured prompt, so the measurement wins here.)`)
+  }
+  if (reading.percent !== undefined && reading.percent > 100) {
+    lines.push(chinese
+      ? '（实测占用已超过该路由的窗口容量：可能是该路由允许超窗，或窗口取自更早的另一条路由。）'
+      : '(the measured prompt exceeds this route window: the route may allow overshoot, or the window came from an earlier route.)')
   }
   if (reading.percent !== undefined && reading.percent >= settings.warnPercent) {
     lines.push(chinese
@@ -183,23 +201,41 @@ export function apply(ctx, config) {
 
   const read = async (session, selection) => {
     let measurement
+    let pressure
     try {
       measurement = ctx.tokenMeter.measure(session)
+      pressure = ctx.tokenMeter.contextPressure(session)
     } catch {
+      // A meter that cannot price this session yields no reading, never a guess.
       return undefined
     }
     const measured = measurement?.totalTokens
     if (typeof measured !== 'number' || !Number.isFinite(measured)) return undefined
-    const sampled = measurement.baseline?.kind !== 'none'
-    const used = Math.max(0, Math.round(measured))
+
+    const kind = measurement.baseline?.kind ?? 'none'
+    const prompt = pressure?.pressureTokens
+    const sample = typeof prompt === 'number' && Number.isFinite(prompt) ? Math.max(0, Math.round(prompt)) : undefined
+
+    // With no usage anchor the meter reprices the whole session surface, which
+    // includes history the request pipeline never sends once a compression
+    // layer rewrites requests; that estimate can exceed the window it is
+    // measured against. The last real prompt size is the only number that
+    // still describes what the provider received, so it wins whenever the
+    // meter could not anchor on one.
+    const surfaceOnly = kind === 'estimated' && sample !== undefined
+    const basis = kind === 'none' ? 'none' : surfaceOnly ? 'sample' : 'pending'
+    const used = basis === 'sample' ? sample : Math.max(0, Math.round(measured))
+    const overstated = surfaceOnly && measured > (sample ?? 0) * 1.5 ? Math.round(measured) : undefined
+
     const window = await contextWindowOf(session, selection)
-    if (!sampled || window === undefined) {
-      return { sampled, used, window, percent: undefined, remaining: undefined }
+    if (basis === 'none' || window === undefined) {
+      return { basis, used, window, overstated, percent: undefined, remaining: undefined }
     }
     return {
-      sampled,
+      basis,
       used,
       window,
+      overstated,
       percent: Math.round((used / window) * 100),
       remaining: Math.max(0, window - used),
     }
