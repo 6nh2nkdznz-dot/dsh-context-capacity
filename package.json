@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-capacity",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "每次模型请求前告诉模型当前上下文窗口的占用：已用 tokens、窗口容量、剩余比例。",
   "type": "module",

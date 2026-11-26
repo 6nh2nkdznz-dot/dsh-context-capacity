@@ -34,8 +34,11 @@ const DEFAULTS = Object.freeze({
   locale: 'en',
   refreshPercent: 10,
   warnPercent: 80,
+  surfaceNote: 'once',
   windowTokens: undefined,
 })
+
+const SURFACE_NOTES = ['once', 'always', 'never']
 
 const NUMBER = new Intl.NumberFormat('en-US')
 
@@ -73,6 +76,13 @@ export const Config = Object.freeze({
           issues.push({ message: `${key} must be a number from ${min} to 100`, path: [key] })
         } else {
           config[key] = candidate
+        }
+      }
+      if (raw.surfaceNote !== undefined) {
+        if (typeof raw.surfaceNote !== 'string' || !SURFACE_NOTES.includes(raw.surfaceNote)) {
+          issues.push({ message: 'surfaceNote must be "once", "always" or "never"', path: ['surfaceNote'] })
+        } else {
+          config.surfaceNote = raw.surfaceNote
         }
       }
       if (raw.windowTokens !== undefined) {
@@ -143,10 +153,10 @@ function render(settings, reading, turn, step) {
       ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${qualifier}）：已用 ${used} / ${window} tokens（${reading.percent}%），剩余 ${remaining}。`
       : `Context capacity sampled before turn ${turn}, step ${step} (${qualifier}): ${used} of ${window} tokens used (${reading.percent}%), ${remaining} remaining.`)
   }
-  if (reading.overstated !== undefined) {
+  if (reading.explain) {
     lines.push(chinese
-      ? `（会话历史在发送前已被压缩：按会话表面重建的估算为 ${NUMBER.format(reading.overstated)} tokens，远高于实测值，故以实测为准。）`
-      : `(history is compressed before sending: repricing the session surface gives ${NUMBER.format(reading.overstated)} tokens, far above the measured prompt, so the measurement wins here.)`)
+      ? `（已丢弃按会话表面重建的 ${NUMBER.format(reading.overstated)} tokens 估算，以实测为准。）`
+      : `(discarded a ${NUMBER.format(reading.overstated)}-token surface reprice; the measurement wins.)`)
   }
   if (reading.percent !== undefined && reading.percent > 100) {
     lines.push(chinese
@@ -171,6 +181,9 @@ export function apply(ctx, config) {
 
   /** Latest injected percentage per session — a cache, never a source of truth. */
   const lastPercent = new WeakMap()
+
+  /** Sessions already told why a surface reprice was discarded. */
+  const explained = new WeakSet()
 
   /** Route → context window; `null` records a lookup that reported nothing. */
   const windows = new Map()
@@ -257,6 +270,13 @@ export function apply(ctx, config) {
     }
 
     if (reading.percent !== undefined) lastPercent.set(session, reading.percent)
+    // Repeating the same explanation every turn would spend the very budget it
+    // describes, so the default says it once per session.
+    if (reading.overstated !== undefined && settings.surfaceNote !== 'never'
+      && (settings.surfaceNote === 'always' || !explained.has(session))) {
+      reading.explain = true
+      explained.add(session)
+    }
     const label = settings.locale === 'zh' ? '上下文容量' : 'Context capacity'
     const text = render(settings, reading, turn, step)
     return { ...decision, messages: [...decision.messages, readingMessage(text, label)] }

@@ -40,11 +40,11 @@ The meter has two ways to price a request. With a usage anchor it reports the sa
 
 That second path is wrong whenever something between the session and the provider rewrites requests, because the surface then holds history the request never carries. The meter refuses a sample smaller than its own surface price, which is exactly what a compression layer produces, so the fallback engages and the estimate grows with the transcript: a 1395-turn session reads around 9.1M tokens against a 1M window, or 910%.
 
-`pressureTokens` is the sample the provider reported for the most recent request, measured before any rewriting is invisible to it, so this plugin prefers it whenever the meter fell back. The reading then says `measured on the most recent request` and adds one line naming the surface estimate it discarded:
+`pressureTokens` is the sample the provider reported for the most recent request, measured before any rewriting is invisible to it, so this plugin prefers it whenever the meter fell back. The reading then says `measured on the most recent request` and, once per session, names the surface estimate it discarded:
 
 ```
 Context capacity sampled before turn 1395, step 1 (measured on the most recent request): 237,064 of 1,000,000 tokens used (24%), 762,936 remaining.
-(history is compressed before sending: repricing the session surface gives 9,100,061 tokens, far above the measured prompt, so the measurement wins here.)
+(discarded a 9,100,061-token surface reprice; the measurement wins.)
 ```
 
 A reading above 100% after that fallback means the provider really did receive a prompt larger than the window this route reports — either the route allows overshoot, or the window was recorded by an earlier route — and the reading says which.
@@ -60,6 +60,7 @@ Every reading stays in the transcript, so repeated readings cost tokens in every
 | `locale` | `en` | `en` or `zh` for the reading text and its section label |
 | `refreshPercent` | `10` | Mid-turn re-read threshold in percentage points; `0` reads on every step |
 | `warnPercent` | `80` | Above this share the reading adds a one-line warning about the limit |
+| `surfaceNote` | `once` | When the reading discarded a surface reprice: `once` explains it on the first reading of a session, `always` on every reading, `never` not at all |
 | `windowTokens` | unset | Fixed window size, overriding whatever the route reports |
 
 The bundle's own `cordis.patch.yml` inserts the plugin with `locale: zh`; override any key in the profile's `cordis.patch.yml` by `id: dsh-context-capacity`.
