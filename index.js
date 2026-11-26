@@ -7,10 +7,11 @@
  * names the turn and step that sampled it so the model can tell a stale
  * number from a fresh one.
  *
- * The reading prefers the prompt size the provider actually reported whenever
- * the meter could not anchor its own estimate on that sample: a session whose
- * history is compressed before sending reprices far above its real prompt, and
- * that repricing says nothing about the next request.
+ * A reading reports one number only: the prompt size the provider reported for
+ * the most recent request. DSH can also reprice the whole session surface, but
+ * that price describes history the request pipeline never sends once a
+ * compression layer rewrites requests, so it is never shown — a session under
+ * compression would otherwise read as many times its own window.
  *
  * The package deliberately imports nothing from the harness. A bundle linked
  * from a local directory resolves its own specifiers from that directory's
@@ -34,11 +35,8 @@ const DEFAULTS = Object.freeze({
   locale: 'en',
   refreshPercent: 10,
   warnPercent: 80,
-  surfaceNote: 'once',
   windowTokens: undefined,
 })
-
-const SURFACE_NOTES = ['once', 'always', 'never']
 
 const NUMBER = new Intl.NumberFormat('en-US')
 
@@ -76,13 +74,6 @@ export const Config = Object.freeze({
           issues.push({ message: `${key} must be a number from ${min} to 100`, path: [key] })
         } else {
           config[key] = candidate
-        }
-      }
-      if (raw.surfaceNote !== undefined) {
-        if (typeof raw.surfaceNote !== 'string' || !SURFACE_NOTES.includes(raw.surfaceNote)) {
-          issues.push({ message: 'surfaceNote must be "once", "always" or "never"', path: ['surfaceNote'] })
-        } else {
-          config.surfaceNote = raw.surfaceNote
         }
       }
       if (raw.windowTokens !== undefined) {
@@ -127,9 +118,8 @@ function readingMessage(text, label) {
  */
 function render(settings, reading, turn, step) {
   const chinese = settings.locale === 'zh'
-  const used = NUMBER.format(reading.used)
   const lines = []
-  if (reading.basis === 'none') {
+  if (!reading.sampled) {
     if (reading.window === undefined) {
       lines.push(chinese
         ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前）：本次会话还没有已记录的请求，该模型路由也尚未报告窗口容量。`
@@ -141,22 +131,13 @@ function render(settings, reading, turn, step) {
     }
   } else if (reading.window === undefined) {
     lines.push(chinese
-      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${reading.basis === 'sample' ? '按最近一次请求实测' : '按待发请求估算'}）：已用约 ${used} tokens，该模型路由尚未报告窗口容量。`
-      : `Context capacity sampled before turn ${turn}, step ${step} (${reading.basis === 'sample' ? 'measured on the most recent request' : 'estimated for the pending request'}): about ${used} tokens used; this route has not reported a context window.`)
+      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，按最近一次请求实测）：已用 ${NUMBER.format(reading.used)} tokens，该模型路由尚未报告窗口容量。`
+      : `Context capacity sampled before turn ${turn}, step ${step} (measured on the most recent request): ${NUMBER.format(reading.used)} tokens used; this route has not reported a context window.`)
   } else {
-    const window = NUMBER.format(reading.window)
-    const remaining = NUMBER.format(reading.remaining)
-    const qualifier = reading.basis === 'sample'
-      ? (chinese ? '按最近一次请求实测' : 'measured on the most recent request')
-      : (chinese ? '按待发请求估算' : 'estimated for the pending request')
+    const qualifier = chinese ? '按最近一次请求实测' : 'measured on the most recent request'
     lines.push(chinese
-      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${qualifier}）：已用 ${used} / ${window} tokens（${reading.percent}%），剩余 ${remaining}。`
-      : `Context capacity sampled before turn ${turn}, step ${step} (${qualifier}): ${used} of ${window} tokens used (${reading.percent}%), ${remaining} remaining.`)
-  }
-  if (reading.explain) {
-    lines.push(chinese
-      ? `（已丢弃按会话表面重建的 ${NUMBER.format(reading.overstated)} tokens 估算，以实测为准。）`
-      : `(discarded a ${NUMBER.format(reading.overstated)}-token surface reprice; the measurement wins.)`)
+      ? `上下文容量（第 ${turn} 轮第 ${step} 步开始前，${qualifier}）：已用 ${NUMBER.format(reading.used)} / ${NUMBER.format(reading.window)} tokens（${reading.percent}%），剩余 ${NUMBER.format(reading.remaining)}。`
+      : `Context capacity sampled before turn ${turn}, step ${step} (${qualifier}): ${NUMBER.format(reading.used)} of ${NUMBER.format(reading.window)} tokens used (${reading.percent}%), ${NUMBER.format(reading.remaining)} remaining.`)
   }
   if (reading.percent !== undefined && reading.percent > 100) {
     lines.push(chinese
@@ -181,9 +162,6 @@ export function apply(ctx, config) {
 
   /** Latest injected percentage per session — a cache, never a source of truth. */
   const lastPercent = new WeakMap()
-
-  /** Sessions already told why a surface reprice was discarded. */
-  const explained = new WeakSet()
 
   /** Route → context window; `null` records a lookup that reported nothing. */
   const windows = new Map()
@@ -213,42 +191,24 @@ export function apply(ctx, config) {
   }
 
   const read = async (session, selection) => {
-    let measurement
     let pressure
     try {
-      measurement = ctx.tokenMeter.measure(session)
       pressure = ctx.tokenMeter.contextPressure(session)
     } catch {
-      // A meter that cannot price this session yields no reading, never a guess.
+      // A meter that cannot describe this session yields no reading, never a guess.
       return undefined
     }
-    const measured = measurement?.totalTokens
-    if (typeof measured !== 'number' || !Number.isFinite(measured)) return undefined
-
-    const kind = measurement.baseline?.kind ?? 'none'
     const prompt = pressure?.pressureTokens
-    const sample = typeof prompt === 'number' && Number.isFinite(prompt) ? Math.max(0, Math.round(prompt)) : undefined
-
-    // With no usage anchor the meter reprices the whole session surface, which
-    // includes history the request pipeline never sends once a compression
-    // layer rewrites requests; that estimate can exceed the window it is
-    // measured against. The last real prompt size is the only number that
-    // still describes what the provider received, so it wins whenever the
-    // meter could not anchor on one.
-    const surfaceOnly = kind === 'estimated' && sample !== undefined
-    const basis = kind === 'none' ? 'none' : surfaceOnly ? 'sample' : 'pending'
-    const used = basis === 'sample' ? sample : Math.max(0, Math.round(measured))
-    const overstated = surfaceOnly && measured > (sample ?? 0) * 1.5 ? Math.round(measured) : undefined
-
+    const used = typeof prompt === 'number' && Number.isFinite(prompt) && prompt >= 0
+      ? Math.round(prompt)
+      : undefined
     const window = await contextWindowOf(session, selection)
-    if (basis === 'none' || window === undefined) {
-      return { basis, used, window, overstated, percent: undefined, remaining: undefined }
-    }
+    if (used === undefined) return { sampled: false, window }
+    if (window === undefined) return { sampled: true, used, window }
     return {
-      basis,
+      sampled: true,
       used,
       window,
-      overstated,
       percent: Math.round((used / window) * 100),
       remaining: Math.max(0, window - used),
     }
@@ -270,13 +230,6 @@ export function apply(ctx, config) {
     }
 
     if (reading.percent !== undefined) lastPercent.set(session, reading.percent)
-    // Repeating the same explanation every turn would spend the very budget it
-    // describes, so the default says it once per session.
-    if (reading.overstated !== undefined && settings.surfaceNote !== 'never'
-      && (settings.surfaceNote === 'always' || !explained.has(session))) {
-      reading.explain = true
-      explained.add(session)
-    }
     const label = settings.locale === 'zh' ? '上下文容量' : 'Context capacity'
     const text = render(settings, reading, turn, step)
     return { ...decision, messages: [...decision.messages, readingMessage(text, label)] }

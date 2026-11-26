@@ -17,7 +17,7 @@ Then install that directory as a profile bundle: `plugin_manager`, action `insta
 Before an admitted step, the plugin appends one user message to that step's messages:
 
 ```
-Context capacity sampled before turn 3, step 1 (estimated for the pending request): 48,120 of 131,072 tokens used (37%), 82,952 remaining.
+Context capacity sampled before turn 3, step 1 (measured on the most recent request): 48,120 of 131,072 tokens used (37%), 82,952 remaining.
 ```
 
 The message source is a `snapshot` (`{ kind: 'context-capacity', form: 'snapshot', sections: [...] }`). The transcript captions it as superseding earlier snapshots, but DSH does not drop the older messages from the request, so every reading stays in history and keeps costing tokens — see [Cadence](#cadence).
@@ -26,32 +26,25 @@ The numbers come from the `tokenMeter` service:
 
 | Figure | Source |
 | --- | --- |
-| used | `ctx.tokenMeter.measure(session).totalTokens` — the next request's estimated occupancy — or, when that estimate could not be anchored on a provider sample, `ctx.tokenMeter.contextPressure(session).pressureTokens`: the prompt size the provider actually reported |
+| used | `ctx.tokenMeter.contextPressure(session).pressureTokens` — the prompt size the provider reported for the most recent request |
 | window | `ctx.tokenMeter.contextPressure(session).contextWindow` (last recorded `request/context`) → `ctx.llm.resolveModelInfo(provider, model).context.contextWindow` → `windowTokens` config |
 | remaining | `window - used`, floored at 0 |
 
 The first step of a session has no recorded request, so `used` is unknown rather than zero: the reading then reports only the window and says no request has been recorded yet. The window itself comes from the model catalog through `llm.resolveModelInfo`, cached per `provider/model` for the life of the activation. When no source reports a window, the reading says so instead of inventing one.
 
-`used` is an estimate: it counts committed messages plus the current prompt surface, not the tokens the model will write back.
+`used` counts the prompt the provider received, not the tokens the model will write back, so the next request is normally a little larger than the reading.
 
-## Why a reading can exceed 100%
+## Why the reading is the provider's prompt size
 
-The meter has two ways to price a request. With a usage anchor it reports the sample plus the surface moved since that sample, and the reading says `estimated for the pending request`. Without a usable anchor it reprices the whole session surface from scratch — every message the session ever committed.
+The meter can price a request two ways, and they disagree as soon as anything rewrites requests between the session and the provider — a compression layer, for instance. Its own repricing walks the whole session surface, which then holds history the request never carries. The meter also refuses a provider sample smaller than that surface price, so the fallback engages on every request and its price grows with the transcript: a 1395-turn session repriced to 9.1M tokens against a 1M window, or 910% of it.
 
-That second path is wrong whenever something between the session and the provider rewrites requests, because the surface then holds history the request never carries. The meter refuses a sample smaller than its own surface price, which is exactly what a compression layer produces, so the fallback engages and the estimate grows with the transcript: a 1395-turn session reads around 9.1M tokens against a 1M window, or 910%.
+`pressureTokens` is the opposite: the prompt size the provider itself reported for the request it just served. It cannot overstate, it is what the window is actually measured against, and it is the only figure that survives a rewriting pipeline. This bundle reports that figure and nothing else — no surface estimate is computed, printed, or compared against.
 
-`pressureTokens` is the sample the provider reported for the most recent request, measured before any rewriting is invisible to it, so this plugin prefers it whenever the meter fell back. The reading then says `measured on the most recent request` and, once per session, names the surface estimate it discarded:
-
-```
-Context capacity sampled before turn 1395, step 1 (measured on the most recent request): 237,064 of 1,000,000 tokens used (24%), 762,936 remaining.
-(discarded a 9,100,061-token surface reprice; the measurement wins.)
-```
-
-A reading above 100% after that fallback means the provider really did receive a prompt larger than the window this route reports — either the route allows overshoot, or the window was recorded by an earlier route — and the reading says which.
+A reading above 100% therefore means the provider really did receive a prompt larger than the window this route reports: either the route allows overshoot, or the window came from an earlier route. The reading says so when it happens.
 
 ## Cadence
 
-Every reading stays in the transcript, so repeated readings cost tokens in every later request. The plugin therefore reads once per turn, on its first step, and re-reads mid-turn only after the used share grew by `refreshPercent` points since the last reading.
+Every reading stays in the transcript, so repeated readings cost tokens in every later request. The plugin therefore reads once per turn, on its first step, and re-reads mid-turn only after the used share grew by `refreshPercent` points since the last reading. Because the figure is a completed request's prompt size, a mid-turn reading lags the step that triggers it by one request — that is the point: every number the model sees was actually billed.
 
 ## Config
 
@@ -60,7 +53,6 @@ Every reading stays in the transcript, so repeated readings cost tokens in every
 | `locale` | `en` | `en` or `zh` for the reading text and its section label |
 | `refreshPercent` | `10` | Mid-turn re-read threshold in percentage points; `0` reads on every step |
 | `warnPercent` | `80` | Above this share the reading adds a one-line warning about the limit |
-| `surfaceNote` | `once` | When the reading discarded a surface reprice: `once` explains it on the first reading of a session, `always` on every reading, `never` not at all |
 | `windowTokens` | unset | Fixed window size, overriding whatever the route reports |
 
 The bundle's own `cordis.patch.yml` inserts the plugin with `locale: zh`; override any key in the profile's `cordis.patch.yml` by `id: dsh-context-capacity`.
